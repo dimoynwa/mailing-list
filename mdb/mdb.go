@@ -88,16 +88,16 @@ func GetEmail(db *sql.DB, email string) (*EmailEntry, error) {
 	return nil, nil
 }
 
-func UpdateEmail(db *sql.DB, emailEntry EmailEntry) error {
+func UpdateEmail(db *sql.DB, emailEntry EmailEntry, id int64) error {
 	t := emailEntry.ConfirmedAt.Unix()
 
 	_, err := db.Exec(`
-		INSERT INTO emails (email, confirmed_at, opt_out)
-		VALUES (?, ?, ?)
-		ON CONFLICT (email) DO UPDATE SET
-			confirmed_at=?
-			opt_out=?
-	`, emailEntry.Email, t, emailEntry.OptOut, t, emailEntry.OptOut)
+		UPDATE emails
+			SET email = ?,
+				confirmed_at = ?,
+				opt_out = ?
+		WHERE ID = ?
+	`, emailEntry.Email, t, emailEntry.OptOut, id)
 
 	if err != nil {
 		log.Printf("Error upserting email for entry %v: %v\n", emailEntry, err)
@@ -107,13 +107,13 @@ func UpdateEmail(db *sql.DB, emailEntry EmailEntry) error {
 	return nil
 }
 
-func DeleteEmail(db *sql.DB, email string) error {
+func DeleteEmail(db *sql.DB, id int64) error {
 	_, err := db.Exec(`
-		UPDATE emails SET opt_out=true WHERE email = ?
-	`, email)
+		UPDATE emails SET opt_out=true WHERE id = ?
+	`, id)
 
 	if err != nil {
-		log.Printf("Error deleting email %v: %v\n", email, err)
+		log.Printf("Error deleting email with ID %v: %v\n", id, err)
 		return err
 	}
 	return nil

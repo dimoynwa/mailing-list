@@ -2,13 +2,20 @@ package jsonapi
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"io"
 	"log"
 	"mailinglist/mdb"
 	"net/http"
+	"os"
+	"os/signal"
 	"strconv"
+	"time"
+
+	"github.com/gorilla/mux"
+	"github.com/urfave/negroni"
 )
 
 func setJsonHeader(writer http.ResponseWriter) {
@@ -40,6 +47,11 @@ func returnJson[T any](writer http.ResponseWriter, withData func() (T, error)) {
 	if err != nil {
 		log.Println(err)
 		writer.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	if len(dataJson) == 0 {
+		writer.WriteHeader(http.StatusNoContent)
 		return
 	}
 
@@ -83,6 +95,13 @@ func getPagingParams(request *http.Request) (*mdb.GetBatchEmailQueryParams, erro
 	return &mdb.GetBatchEmailQueryParams{Page: page, Count: count}, nil
 }
 
+func extractIdFromRequest(request *http.Request) (int64, error) {
+	vars := mux.Vars(request)
+	idStr := vars["id"]
+
+	return strconv.ParseInt(idStr, 10, 64)
+}
+
 func CreateEmail(db *sql.DB) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodPost {
@@ -107,10 +126,6 @@ func CreateEmail(db *sql.DB) http.Handler {
 
 func GetEmail(db *sql.DB) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.Method != http.MethodGet {
-			writer.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
 
 		email := request.URL.Query().Get("email")
 
@@ -123,10 +138,6 @@ func GetEmail(db *sql.DB) http.Handler {
 
 func GetBatchEmail(db *sql.DB) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.Method != http.MethodGet {
-			writer.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
 
 		params, err := getPagingParams(request)
 
@@ -143,15 +154,16 @@ func GetBatchEmail(db *sql.DB) http.Handler {
 
 func UpdateEmail(db *sql.DB) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.Method != http.MethodPut {
-			writer.WriteHeader(http.StatusMethodNotAllowed)
+		id, err := extractIdFromRequest(request)
+		if err != nil {
+			returnErr(writer, err, http.StatusBadRequest)
 			return
 		}
 
 		entry := &mdb.EmailEntry{}
 		fromJson(request.Body, entry)
 
-		if err := mdb.UpdateEmail(db, *entry); err != nil {
+		if err := mdb.UpdateEmail(db, *entry, id); err != nil {
 			returnErr(writer, err, http.StatusBadRequest)
 			return
 		}
@@ -165,36 +177,72 @@ func UpdateEmail(db *sql.DB) http.Handler {
 
 func DeleteEmail(db *sql.DB) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.Method != http.MethodPost {
-			writer.WriteHeader(http.StatusMethodNotAllowed)
+		id, err := extractIdFromRequest(request)
+		if err != nil {
+			returnErr(writer, err, http.StatusBadRequest)
 			return
 		}
 
-		entry := &mdb.EmailEntry{}
-		fromJson(request.Body, entry)
-
-		if err := mdb.DeleteEmail(db, entry.Email); err != nil {
+		if err = mdb.DeleteEmail(db, id); err != nil {
 			returnErr(writer, err, http.StatusBadRequest)
 			return
 		}
 
 		returnJson(writer, func() (interface{}, error) {
-			log.Printf("JSON Delete email: %v\n", entry.Email)
-			return mdb.GetEmail(db, entry.Email)
+			log.Printf("JSON Delete email for ID: %v\n", id)
+			return "", nil
 		})
 	})
 }
 
+func loggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("[request] -> [%s] %s\n", r.Method, r.RequestURI)
+		lrw := negroni.NewResponseWriter(w)
+		defer func() {
+			log.Printf("[response] -> [%s] [%d]\n", r.RequestURI, lrw.Status())
+		}()
+		next.ServeHTTP(lrw, r)
+	})
+}
+
 func Serve(db *sql.DB, bind string) {
-	http.Handle("/email/create", CreateEmail(db))
-	http.Handle("/email/get", GetEmail(db))
-	http.Handle("/email/get_batch", GetBatchEmail(db))
-	http.Handle("/email/update", UpdateEmail(db))
-	http.Handle("/email/delete", DeleteEmail(db))
+	router := mux.NewRouter().StrictSlash(true)
+
+	api := router.PathPrefix("/email").Subrouter()
+	api.Use(loggingMiddleware)
+	api.Handle("", GetEmail(db)).Methods(http.MethodGet)
+	api.Handle("", CreateEmail(db)).Methods(http.MethodPost)
+	api.Handle("/{id}", UpdateEmail(db)).Methods(http.MethodPut)
+	api.Handle("/{id}", DeleteEmail(db)).Methods(http.MethodDelete)
+
+	api.Handle("/batch", GetBatchEmail(db)).Methods(http.MethodGet)
+
 	log.Printf("JSON API serve and listening on %v\n", bind)
 
-	err := http.ListenAndServe(bind, nil)
-	if err != nil {
-		log.Fatalf("Error starting server at %v\n", bind)
+	serv := &http.Server{
+		Addr:         bind,
+		Handler:      router,
+		IdleTimeout:  120 * time.Second,
+		ReadTimeout:  1 * time.Second,
+		WriteTimeout: 1 * time.Second,
 	}
+
+	go func() {
+		log.Printf("Starting server on port %v...\n ", serv.Addr)
+		if err := serv.ListenAndServe(); err != nil {
+			log.Fatalf("error starting the server: %v", err)
+		}
+	}()
+
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Kill)
+	signal.Notify(sigChan, os.Interrupt)
+
+	sig := <-sigChan
+	log.Printf("Received terminal signal %v, Graceful shutdown\n", sig)
+
+	tc, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	serv.Shutdown(tc)
 }

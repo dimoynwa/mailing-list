@@ -5,7 +5,6 @@ import (
 	"log"
 	"mailinglist/jsonapi"
 	"mailinglist/mdb"
-	"sync"
 
 	"github.com/alexflint/go-arg"
 )
@@ -36,14 +35,6 @@ func main() {
 
 	mdb.TryCreate(db)
 
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		log.Printf("starting json API on bind address %v\n", args.Bind)
-		jsonapi.Serve(db, args.Bind)
-		wg.Done()
-	}()
-
-	wg.Wait()
+	jsonapi.Serve(db, args.Bind)
 
 }
