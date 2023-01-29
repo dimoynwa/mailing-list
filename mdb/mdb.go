@@ -107,6 +107,26 @@ func UpdateEmail(db *sql.DB, emailEntry EmailEntry, id int64) error {
 	return nil
 }
 
+func UpsertEmail(db *sql.DB, emailEntry EmailEntry) error {
+	t := emailEntry.ConfirmedAt.Unix()
+
+	_, err := db.Exec(`
+		INSERT INTO emails(email, confirmed_at, opt_out)
+		VALUES(?, ?, ?)
+		ON CONFLICT(email) 
+		DO UPDATE 
+			SET confirmed_at = ?,
+				opt_out = ?
+	`, emailEntry.Email, t, emailEntry.OptOut, t, emailEntry.OptOut)
+
+	if err != nil {
+		log.Printf("Error upserting email for entry %v: %v\n", emailEntry, err)
+		return err
+	}
+
+	return nil
+}
+
 func DeleteEmail(db *sql.DB, id int64) error {
 	_, err := db.Exec(`
 		UPDATE emails SET opt_out=true WHERE id = ?
@@ -114,6 +134,18 @@ func DeleteEmail(db *sql.DB, id int64) error {
 
 	if err != nil {
 		log.Printf("Error deleting email with ID %v: %v\n", id, err)
+		return err
+	}
+	return nil
+}
+
+func DeleteEmailByEmail(db *sql.DB, email string) error {
+	_, err := db.Exec(`
+		UPDATE emails SET opt_out=true WHERE email = ?
+	`, email)
+
+	if err != nil {
+		log.Printf("Error deleting email with email %v: %v\n", email, err)
 		return err
 	}
 	return nil
@@ -127,7 +159,7 @@ func GetEmailBatch(db *sql.DB, params GetBatchEmailQueryParams) ([]*EmailEntry, 
 	var empty []*EmailEntry
 
 	rows, err := db.Query(`
-		SELECT id, email, confirmed_at, opt_out FROM email 
+		SELECT id, email, confirmed_at, opt_out FROM emails 
 		WHERE opt_out=false ORDER BY id ASC
 		LIMIT ? OFFSET ?
 	`, params.Count, (params.Page-1)*params.Count)

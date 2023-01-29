@@ -9,8 +9,6 @@ import (
 	"log"
 	"mailinglist/mdb"
 	"net/http"
-	"os"
-	"os/signal"
 	"strconv"
 	"time"
 
@@ -206,7 +204,7 @@ func loggingMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func Serve(db *sql.DB, bind string) {
+func Serve(db *sql.DB, bind string) *http.Server {
 	router := mux.NewRouter().StrictSlash(true)
 
 	api := router.PathPrefix("/email").Subrouter()
@@ -235,13 +233,11 @@ func Serve(db *sql.DB, bind string) {
 		}
 	}()
 
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Kill)
-	signal.Notify(sigChan, os.Interrupt)
+	return serv
 
-	sig := <-sigChan
-	log.Printf("Received terminal signal %v, Graceful shutdown\n", sig)
+}
 
+func Shutdown(serv *http.Server) {
 	tc, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	serv.Shutdown(tc)
